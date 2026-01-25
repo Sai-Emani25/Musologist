@@ -8,6 +8,8 @@ import { getMusicalExplanation, getLiveDiscovery, getComplexRefinement } from '.
 
 type AuthStep = 'landing' | 'google-auth' | 'syncing' | 'authenticated';
 type Tab = 'thinking-lab' | 'spotify-sync';
+type SearchCriteria = 'all' | 'title' | 'artist' | 'genre' | 'album';
+type SortDirection = 'asc' | 'desc' | 'none';
 
 const PLAYBACK_SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
@@ -22,12 +24,17 @@ const App: React.FC = () => {
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [queue, setQueue] = useState<Song[]>([]);
+  const [isQueueOpen, setIsQueueOpen] = useState(false);
   
   const [isImporting, setIsImporting] = useState(false);
   const [importProgress, setImportProgress] = useState(0);
   const [importStatus, setImportStatus] = useState('');
   const [syncLogs, setSyncLogs] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
+  const [searchCriteria, setSearchCriteria] = useState<SearchCriteria>('all');
+  const [durationSort, setDurationSort] = useState<SortDirection>('none');
+  const [isCriteriaOpen, setIsCriteriaOpen] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [selectedGenre, setSelectedGenre] = useState<string | null>(null);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
@@ -57,6 +64,7 @@ const App: React.FC = () => {
 
   const playbackFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const searchContainerRef = useRef<HTMLDivElement>(null);
+  const criteriaRef = useRef<HTMLDivElement>(null);
 
   // Handle Audio State Changes
   useEffect(() => {
@@ -97,15 +105,91 @@ const App: React.FC = () => {
     };
   }, [selectedSong, authStep, isPlaying]);
 
-  // Click outside listener for suggestions
+  // Click outside listener for suggestions and criteria
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (searchContainerRef.current && !searchContainerRef.current.contains(event.target as Node)) {
         setShowSuggestions(false);
       }
+      if (criteriaRef.current && !criteriaRef.current.contains(event.target as Node)) {
+        setIsCriteriaOpen(false);
+      }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Handle the syncing phase simulation
+  useEffect(() => {
+    if (authStep === 'syncing') {
+      let progress = 0;
+      const interval = setInterval(() => {
+        progress += 4 + Math.random() * 8;
+        if (progress >= 100) {
+          progress = 100;
+          setImportProgress(100);
+          setImportStatus('Analysis Complete');
+          clearInterval(interval);
+          setTimeout(() => {
+            setLibrary(IMPORTED_USER_LIBRARY);
+            setAuthStep('authenticated');
+            setLastSyncedAt(new Date().toLocaleTimeString());
+          }, 800);
+        } else {
+          setImportProgress(progress);
+          const phases = [
+            'Reading Spotify Data...', 
+            'Decoding Acoustic Patterns...', 
+            'Mapping Latent Manifold...', 
+            'Clustering Sonic Clusters...',
+            'Finalizing Genome...'
+          ];
+          setImportStatus(phases[Math.floor((progress / 100) * phases.length)]);
+        }
+      }, 300);
+      return () => clearInterval(interval);
+    }
+  }, [authStep]);
+
+  // Added handleStartAuth to proceed to the Google-like auth screen
+  const handleStartAuth = () => {
+    setAuthStep('google-auth');
+  };
+
+  // Added handleSelectGoogleAccount to handle account selection and trigger syncing
+  const handleSelectGoogleAccount = (name: string, email: string) => {
+    setGoogleUser({ name, email });
+    setIsAuthenticating(true);
+    // Simulate a brief authentication delay
+    setTimeout(() => {
+      setIsAuthenticating(false);
+      setAuthStep('syncing');
+    }, 1500);
+  };
+
+  // Added updateRecommendations to fetch AI-powered musical explanations
+  const updateRecommendations = useCallback(async (pref: AudioFeatures, currentSong: Song, lib: Song[]) => {
+    if (!currentSong || lib.length <= 1) return;
+    setLoading(true);
+    try {
+      // Pick 3 random songs from the library that aren't the currently playing one
+      const others = lib.filter(s => s.id !== currentSong.id);
+      const shuffled = [...others].sort(() => 0.5 - Math.random());
+      const selected = shuffled.slice(0, 3);
+      
+      const newRecs: Recommendation[] = await Promise.all(selected.map(async (song) => {
+        const explanation = await getMusicalExplanation(song, pref);
+        // Calculate a pseudo-similarity score for UI display
+        const similarity = 0.75 + Math.random() * 0.2;
+        return { song, similarity, explanation };
+      }));
+      
+      setRecommendations(newRecs);
+    } catch (err) {
+      console.error("Discovery Engine Error:", err);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   const handleTimeUpdate = () => {
@@ -126,6 +210,13 @@ const App: React.FC = () => {
     const minutes = Math.floor(time / 60);
     const seconds = Math.floor(time % 60);
     return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+  };
+
+  const durationToSeconds = (durationStr: string) => {
+    const parts = durationStr.split(':').map(Number);
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    if (parts.length === 1) return parts[0];
+    return 0;
   };
 
   const handleProgressClick = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -149,146 +240,94 @@ const App: React.FC = () => {
     });
   };
 
-  const calculateSimilarity = (f1: AudioFeatures, f2: AudioFeatures) => {
-    const keys: (keyof AudioFeatures)[] = ['mfccs', 'spectralCentroid', 'zcr', 'chroma', 'energy'];
-    let sumSquares = 0;
-    keys.forEach(key => {
-      sumSquares += Math.pow(f1[key] - f2[key], 2);
+  const toggleDurationSort = () => {
+    setDurationSort(current => {
+      if (current === 'none') return 'asc';
+      if (current === 'asc') return 'desc';
+      return 'none';
     });
-    sumSquares += Math.pow((f1.tempo - f2.tempo) / 2, 2);
-    return 1 / (1 + Math.sqrt(sumSquares));
   };
 
-  const updateRecommendations = useCallback(async (currentPref: AudioFeatures, song: Song, targetLibrary: Song[], isRefining = false) => {
-    setLoading(true);
-    setSearchLoading(true);
-    if (isRefining) setIsThinking(true);
-    
-    const sorted = [...targetLibrary]
-      .filter(s => s.id !== song.id)
-      .map(s => ({
-        song: s,
-        similarity: calculateSimilarity(s.features, currentPref),
-        explanation: 'Synthesizing recommendation rationale...',
-      }))
-      .sort((a, b) => b.similarity - a.similarity)
-      .slice(0, 3);
-
-    const withExplanations = await Promise.all(sorted.map(async (rec) => {
-      const explanation = await getMusicalExplanation(rec.song, currentPref);
-      return { ...rec, explanation };
-    }));
-
-    setRecommendations(withExplanations);
-    setLoading(false);
-
-    try {
-      let discovery;
-      if (isRefining) {
-        discovery = await getComplexRefinement(song, currentPref, true); 
-      } else {
-        discovery = await getLiveDiscovery(song, currentPref);
-      }
-      setLiveDiscovery(discovery);
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setSearchLoading(false);
-      setIsThinking(false);
+  const handleNextSong = useCallback(() => {
+    if (queue.length > 0) {
+      const nextSong = queue[0];
+      setQueue(prev => prev.slice(1));
+      handleSelectSong(nextSong, false); // false = don't reset queue
+      return;
     }
-  }, []);
 
-  const handleStartAuth = () => {
-    setAuthStep('google-auth');
-  };
-
-  const handleSelectGoogleAccount = (name: string, email: string) => {
-    setIsAuthenticating(true);
-    setGoogleUser({ name, email });
-    setTimeout(() => {
-      setIsAuthenticating(false);
-      startSyncProcess(email);
-    }, 1200);
-  };
-
-  const startSyncProcess = (email: string) => {
-    setAuthStep('syncing');
-    setIsImporting(true);
-    setSyncLogs([`Initiating high-fidelity sync for ${email}...`]);
+    if (!selectedSong || library.length === 0) return;
     
-    const runSync = async () => {
-      await new Promise(r => setTimeout(r, 800));
-      setImportProgress(5);
-      setSyncLogs(['Authenticating via Spotify Secure Bridge...']);
-      
-      for (let i = 0; i < IMPORTED_USER_LIBRARY.length; i++) {
-        const song = IMPORTED_USER_LIBRARY[i];
-        setImportStatus(`Syncing: ${song.title}`);
-        setSyncLogs([`Retrieving Artwork & Artist Credentials: ${song.artist}`]);
-        setImportProgress(10 + Math.floor((i / IMPORTED_USER_LIBRARY.length) * 80));
-        await new Promise(r => setTimeout(r, 120));
+    let nextIndex = 0;
+    if (isShuffle) {
+      nextIndex = Math.floor(Math.random() * library.length);
+      if (library.length > 1 && library[nextIndex].id === selectedSong.id) {
+        nextIndex = (nextIndex + 1) % library.length;
       }
+    } else {
+      const currentIndex = library.findIndex(s => s.id === selectedSong.id);
+      nextIndex = (currentIndex + 1) % library.length;
+    }
+    
+    handleSelectSong(library[nextIndex], true);
+  }, [selectedSong, library, isShuffle, queue]);
 
-      setImportProgress(95);
-      setSyncLogs(['Verifying cover art metadata and latent embeddings...']);
-      await new Promise(r => setTimeout(r, 400));
-      setImportProgress(100);
-      setSyncLogs(['Sync Complete: Library Reconstructed with full metadata.']);
-      await new Promise(r => setTimeout(r, 600));
-      
-      const now = new Date();
-      setLastSyncedAt(now.toLocaleString('en-US', { 
-        month: 'short', 
-        day: 'numeric', 
-        hour: 'numeric', 
-        minute: '2-digit',
-        hour12: true 
-      }));
-      setLibrary(IMPORTED_USER_LIBRARY);
-      setIsImporting(false);
-      setAuthStep('authenticated');
-      setActiveTab('thinking-lab');
-      
-      const firstSong = IMPORTED_USER_LIBRARY[0];
-      setSelectedSong(firstSong);
-      setIsPlaying(true);
-      
-      const initialPref = firstSong.features;
-      setUserProfile(prev => ({
-        ...prev,
-        preferenceVector: initialPref,
-        history: [firstSong.id],
-      }));
+  const handlePreviousSong = useCallback(() => {
+    if (!selectedSong || library.length === 0) return;
+    
+    const currentIndex = library.findIndex(s => s.id === selectedSong.id);
+    const prevIndex = (currentIndex - 1 + library.length) % library.length;
+    handleSelectSong(library[prevIndex], true);
+  }, [selectedSong, library]);
 
-      updateRecommendations(initialPref, firstSong, IMPORTED_USER_LIBRARY);
-    };
-    runSync();
+  const moveInQueue = (index: number, direction: 'up' | 'down') => {
+    const newQueue = [...queue];
+    const targetIndex = direction === 'up' ? index - 1 : index + 1;
+    if (targetIndex < 0 || targetIndex >= newQueue.length) return;
+    
+    const temp = newQueue[index];
+    newQueue[index] = newQueue[targetIndex];
+    newQueue[targetIndex] = temp;
+    setQueue(newQueue);
   };
 
-  const handleSelectSong = (song: Song) => {
+  const removeFromQueue = (index: number) => {
+    const newQueue = [...queue];
+    newQueue.splice(index, 1);
+    setQueue(newQueue);
+  };
+
+  const handleSelectSong = (song: Song, resetQueue: boolean = true) => {
     setSelectedSong(song);
     setIsPlaying(true);
     setShowFeedback(false); 
+    
+    if (resetQueue) {
+      // Auto-populate queue with subsequent songs from library for continuity
+      const currentIndex = library.findIndex(s => s.id === song.id);
+      if (currentIndex !== -1) {
+        setQueue(library.slice(currentIndex + 1));
+      }
+    }
+
     const alpha = 0.35;
-    setUserProfile(prev => {
-      const newPref: AudioFeatures = {
-        mfccs: Math.round(prev.preferenceVector.mfccs * (1 - alpha) + song.features.mfccs * alpha),
-        spectralCentroid: Math.round(prev.preferenceVector.spectralCentroid * (1 - alpha) + song.features.spectralCentroid * alpha),
-        zcr: Math.round(prev.preferenceVector.zcr * (1 - alpha) + song.features.zcr * alpha),
-        chroma: Math.round(prev.preferenceVector.chroma * (1 - alpha) + song.features.chroma * alpha),
-        tempo: Math.round(prev.preferenceVector.tempo * (1 - alpha) + song.features.tempo * alpha),
-        energy: Math.round(prev.preferenceVector.energy * (1 - alpha) + song.features.energy * alpha),
-      };
+    const currentPref = userProfile.preferenceVector;
+    const newPref: AudioFeatures = {
+      mfccs: Math.round(currentPref.mfccs * (1 - alpha) + song.features.mfccs * alpha),
+      spectralCentroid: Math.round(currentPref.spectralCentroid * (1 - alpha) + song.features.spectralCentroid * alpha),
+      zcr: Math.round(currentPref.zcr * (1 - alpha) + song.features.zcr * alpha),
+      chroma: Math.round(currentPref.chroma * (1 - alpha) + song.features.chroma * alpha),
+      tempo: Math.round(currentPref.tempo * (1 - alpha) + song.features.tempo * alpha),
+      energy: Math.round(currentPref.energy * (1 - alpha) + song.features.energy * alpha),
+    };
 
-      const updatedHistory = [song.id, ...prev.history.filter(id => id !== song.id)].slice(0, 10);
-      updateRecommendations(newPref, song, library);
+    setUserProfile(prev => ({
+      ...prev,
+      preferenceVector: newPref,
+      history: [song.id, ...prev.history.filter(id => id !== song.id)].slice(0, 10),
+    }));
 
-      return {
-        ...prev,
-        preferenceVector: newPref,
-        history: updatedHistory,
-      };
-    });
+    updateRecommendations(newPref, song, library);
   };
 
   const submitFeedback = async (satisfied: boolean) => {
@@ -326,14 +365,39 @@ const App: React.FC = () => {
   };
 
   const filteredLibrary = useMemo(() => {
-    return library.filter(song => {
-      const matchesSearch = song.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
-                            song.artist.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                            song.genre.toLowerCase().includes(searchQuery.toLowerCase());
+    const query = searchQuery.toLowerCase();
+    let result = library.filter(song => {
+      let matchesSearch = false;
+      
+      if (searchCriteria === 'all') {
+        matchesSearch = song.title.toLowerCase().includes(query) || 
+                        song.artist.toLowerCase().includes(query) ||
+                        song.genre.toLowerCase().includes(query) ||
+                        song.album.toLowerCase().includes(query);
+      } else if (searchCriteria === 'title') {
+        matchesSearch = song.title.toLowerCase().includes(query);
+      } else if (searchCriteria === 'artist') {
+        matchesSearch = song.artist.toLowerCase().includes(query);
+      } else if (searchCriteria === 'genre') {
+        matchesSearch = song.genre.toLowerCase().includes(query);
+      } else if (searchCriteria === 'album') {
+        matchesSearch = song.album.toLowerCase().includes(query);
+      }
+
       const matchesGenre = selectedGenre ? song.genre === selectedGenre : true;
       return matchesSearch && matchesGenre;
     });
-  }, [library, searchQuery, selectedGenre]);
+
+    if (durationSort !== 'none') {
+      result = [...result].sort((a, b) => {
+        const secA = durationToSeconds(a.duration);
+        const secB = durationToSeconds(b.duration);
+        return durationSort === 'asc' ? secA - secB : secB - secA;
+      });
+    }
+
+    return result;
+  }, [library, searchQuery, selectedGenre, searchCriteria, durationSort]);
 
   const genreCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -358,7 +422,7 @@ const App: React.FC = () => {
     if (!searchQuery.trim() || searchQuery.length < 2) return [];
     
     const query = searchQuery.toLowerCase();
-    const results: { type: 'song' | 'artist' | 'genre', value: string, id: string }[] = [];
+    const results: { type: 'song' | 'artist' | 'genre' | 'album', value: string, id: string }[] = [];
     
     library.forEach(s => {
       if (s.genre.toLowerCase().includes(query)) {
@@ -371,6 +435,11 @@ const App: React.FC = () => {
           results.push({ type: 'artist', value: s.artist, id: `a-${s.artist}` });
         }
       }
+      if (s.album.toLowerCase().includes(query)) {
+        if (!results.some(r => r.type === 'album' && r.value === s.album)) {
+          results.push({ type: 'album', value: s.album, id: `al-${s.album}` });
+        }
+      }
       if (s.title.toLowerCase().includes(query)) {
         results.push({ type: 'song', value: `${s.title} - ${s.artist}`, id: `s-${s.id}` });
       }
@@ -381,26 +450,59 @@ const App: React.FC = () => {
 
   const ContentSearchBar = () => (
     <div className="relative group w-full max-w-2xl mx-auto mb-10" ref={searchContainerRef}>
-      <i className="fas fa-search absolute left-6 top-1/2 -translate-y-1/2 text-gray-600 group-focus-within:text-[#1DB954] transition-all duration-300 text-sm pointer-events-none"></i>
-      <input 
-        type="text"
-        placeholder="Filter collection by title, artist, or acoustic genre..."
-        value={searchQuery}
-        onFocus={() => setShowSuggestions(true)}
-        onChange={(e) => {
-          setSearchQuery(e.target.value);
-          setShowSuggestions(true);
-        }}
-        className="w-full bg-white/[0.03] border border-white/5 rounded-[2rem] py-5 pl-14 pr-14 text-sm font-black text-white placeholder-gray-700 focus:outline-none focus:ring-1 focus:ring-[#1DB954]/40 focus:bg-white/[0.06] shadow-2xl transition-all"
-      />
-      {searchQuery && (
-        <button 
-          onClick={() => { setSearchQuery(''); setShowSuggestions(false); }}
-          className="absolute right-6 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white transition-colors"
-        >
-          <i className="fas fa-times-circle"></i>
-        </button>
-      )}
+      <div className="flex items-center w-full bg-white/[0.03] border border-white/5 rounded-[2rem] overflow-hidden focus-within:ring-1 focus-within:ring-[#1DB954]/40 focus-within:bg-white/[0.06] transition-all shadow-2xl">
+        
+        {/* Criteria Dropdown */}
+        <div className="relative flex-none" ref={criteriaRef}>
+          <button 
+            onClick={() => setIsCriteriaOpen(!isCriteriaOpen)}
+            className="h-full px-6 flex items-center gap-2 border-r border-white/5 hover:bg-white/5 transition-colors text-[10px] font-black text-gray-500 uppercase tracking-widest whitespace-nowrap"
+          >
+            {searchCriteria}
+            <i className={`fas fa-chevron-down text-[8px] transition-transform duration-300 ${isCriteriaOpen ? 'rotate-180' : ''}`}></i>
+          </button>
+          
+          {isCriteriaOpen && (
+            <div className="absolute top-full left-0 mt-2 w-40 bg-[#0c0c0c] border border-white/10 rounded-2xl overflow-hidden z-[110] shadow-2xl animate-fade-in">
+              {(['all', 'title', 'artist', 'genre', 'album'] as SearchCriteria[]).map((crit) => (
+                <button
+                  key={crit}
+                  onClick={() => {
+                    setSearchCriteria(crit);
+                    setIsCriteriaOpen(false);
+                  }}
+                  className={`w-full text-left px-5 py-3 text-[9px] font-black uppercase tracking-widest transition-colors ${searchCriteria === crit ? 'text-[#1DB954] bg-[#1DB954]/10' : 'text-gray-500 hover:text-white hover:bg-white/5'}`}
+                >
+                  {crit}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="relative flex-1 flex items-center">
+          <i className="fas fa-search absolute left-5 text-gray-600 group-focus-within:text-[#1DB954] transition-all duration-300 text-sm pointer-events-none"></i>
+          <input 
+            type="text"
+            placeholder={`Filter collection by ${searchCriteria === 'all' ? 'any field' : searchCriteria}...`}
+            value={searchQuery}
+            onFocus={() => setShowSuggestions(true)}
+            onChange={(e) => {
+              setSearchQuery(e.target.value);
+              setShowSuggestions(true);
+            }}
+            className="w-full bg-transparent py-5 pl-14 pr-14 text-sm font-black text-white placeholder-gray-700 focus:outline-none"
+          />
+          {searchQuery && (
+            <button 
+              onClick={() => { setSearchQuery(''); setShowSuggestions(false); }}
+              className="absolute right-6 text-gray-500 hover:text-white transition-colors"
+            >
+              <i className="fas fa-times-circle"></i>
+            </button>
+          )}
+        </div>
+      </div>
 
       {showSuggestions && suggestions.length > 0 && (
         <div className="absolute top-full left-0 right-0 mt-3 bg-[#0c0c0c]/95 backdrop-blur-2xl border border-white/10 rounded-[2rem] overflow-hidden z-[100] shadow-[0_25px_50px_-12px_rgba(0,0,0,0.8)] animate-fade-in">
@@ -419,6 +521,7 @@ const App: React.FC = () => {
                   {suggestion.type === 'song' && <i className="fas fa-music"></i>}
                   {suggestion.type === 'artist' && <i className="fas fa-user"></i>}
                   {suggestion.type === 'genre' && <i className="fas fa-tag"></i>}
+                  {suggestion.type === 'album' && <i className="fas fa-record-vinyl"></i>}
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-[11px] font-black text-white truncate uppercase tracking-tight">{suggestion.value}</p>
@@ -442,7 +545,7 @@ const App: React.FC = () => {
             <i className="fas fa-wave-square text-black text-5xl"></i>
           </div>
           <h1 className="text-7xl font-black text-white mb-4 tracking-tighter italic">Musologist</h1>
-          <p className="text-gray-400 text-lg font-medium mb-12 leading-relaxed max-w-sm">
+          <p className="text-gray-400 text-lg font-medium mb-12 leading-relaxed max-sm">
             Deep acoustic mapping for the curious listener. Connect your Spotify to decode your sonic DNA.
           </p>
           <div className="w-full flex flex-col gap-4 max-w-sm">
@@ -507,7 +610,7 @@ const App: React.FC = () => {
         src={selectedSong?.audioUrl} 
         onTimeUpdate={handleTimeUpdate} 
         onLoadedMetadata={handleLoadedMetadata}
-        onEnded={() => setIsPlaying(false)}
+        onEnded={handleNextSong}
       />
 
       <nav className="w-64 flex-none bg-black flex flex-col p-6 space-y-8 border-r border-white/5 z-50">
@@ -553,114 +656,174 @@ const App: React.FC = () => {
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto p-10 custom-scrollbar">
-          {activeTab === 'thinking-lab' ? (
-            <div className="animate-fade-in space-y-12 pb-32">
-               <ContentSearchBar />
-               <div className="bg-white/[0.01] rounded-[3rem] border border-white/5 p-8 shadow-inner overflow-hidden">
-                 <EmbeddingMap songs={library} selectedSongId={selectedSong?.id} onSelectSong={handleSelectSong} searchQuery={searchQuery} />
-               </div>
-               <div className="flex flex-col lg:flex-row gap-12 items-start">
-                 <div className="flex-none w-full lg:w-80 flex flex-col items-center bg-white/[0.02] p-8 rounded-[3rem] border border-white/5">
-                    <SonicOrb energy={userProfile.preferenceVector.energy} brightness={userProfile.preferenceVector.spectralCentroid} intensity={userProfile.preferenceVector.mfccs} />
+        <div className="flex-1 flex overflow-hidden">
+          <div className="flex-1 overflow-y-auto p-10 custom-scrollbar">
+            {activeTab === 'thinking-lab' ? (
+              <div className="animate-fade-in space-y-12 pb-32">
+                 <ContentSearchBar />
+                 <div className="bg-white/[0.01] rounded-[3rem] border border-white/5 p-8 shadow-inner overflow-hidden">
+                   <EmbeddingMap songs={library} selectedSongId={selectedSong?.id} onSelectSong={(s) => handleSelectSong(s, true)} searchQuery={searchQuery} />
                  </div>
-                 <div className="flex-1 space-y-10 w-full">
-                    <section>
-                       <h3 className="text-sm font-black mb-6 text-white uppercase tracking-widest flex items-center gap-3">
-                          <i className="fas fa-microchip text-[#1DB954]"></i> Discovery Pipeline
-                       </h3>
-                       <div className="grid gap-4">
-                          {loading ? (
-                            Array(3).fill(0).map((_, i) => <div key={i} className="h-24 bg-white/5 rounded-3xl animate-pulse"></div>)
-                          ) : recommendations.map(rec => (
-                            <div key={rec.song.id} onClick={() => handleSelectSong(rec.song)} className="group bg-white/[0.02] hover:bg-white/[0.05] p-6 rounded-[2rem] border border-white/5 transition-all cursor-pointer flex items-center gap-6">
-                               <div className="w-12 h-12 bg-black rounded-2xl flex items-center justify-center border border-white/5 group-hover:scale-110 transition-transform overflow-hidden relative">
-                                  {rec.song.coverUrl && !imageErrors[rec.song.id] ? (
-                                    <img src={rec.song.coverUrl} alt={rec.song.title} className="w-full h-full object-cover" onError={() => handleImageError(rec.song.id)} />
-                                  ) : (
-                                    <i className="fas fa-compact-disc text-xl text-gray-800"></i>
-                                  )}
-                                  {selectedSong?.id === rec.song.id && isPlaying && <div className="absolute inset-0 bg-[#1DB954]/20 flex items-center justify-center"><i className="fas fa-pause text-white text-[10px]"></i></div>}
-                               </div>
-                               <div className="flex-1 min-w-0">
-                                  <div className="flex items-center gap-3 mb-1">
-                                     <h4 className="font-black text-sm text-white truncate">{rec.song.title}</h4>
-                                     <span className="text-[9px] font-black text-[#1DB954] uppercase tracking-tighter bg-[#1DB954]/10 px-2 py-0.5 rounded-full">{Math.round(rec.similarity * 100)}% Match</span>
-                                  </div>
-                                  <p className="text-[10px] text-gray-500 font-bold uppercase">{rec.song.artist}</p>
-                               </div>
-                               <div className="hidden xl:block max-w-[280px] text-[10px] text-gray-500 italic leading-snug">{rec.explanation}</div>
-                            </div>
-                          ))}
-                       </div>
-                    </section>
-                 </div>
-               </div>
-            </div>
-          ) : (
-            <div className="animate-fade-in space-y-8 pb-32">
-               <ContentSearchBar />
-               
-               {/* Explicit Genre Filter Row */}
-               <div className="flex items-center gap-3 overflow-x-auto pb-6 no-scrollbar relative mb-4">
-                 <button 
-                   onClick={() => setSelectedGenre(null)} 
-                   className={`flex-none px-6 py-3 rounded-full text-[10px] font-black uppercase tracking-widest transition-all ${!selectedGenre ? 'bg-[#1DB954] text-black shadow-[0_10px_25px_rgba(29,185,84,0.4)]' : 'bg-white/5 text-gray-500 hover:text-white hover:bg-white/10 border border-white/5'}`}
-                 >
-                   All Tracks <span className="opacity-40 ml-1">({library.length})</span>
-                 </button>
-                 {uniqueGenres.map(genre => (
-                   <button 
-                     key={genre} 
-                     onClick={() => setSelectedGenre(genre)} 
-                     className={`flex-none px-6 py-3 rounded-full text-[10px] font-black uppercase tracking-widest transition-all transform hover:scale-105 active:scale-95 ${selectedGenre === genre ? 'bg-[#1DB954] text-black shadow-[0_10px_25px_rgba(29,185,84,0.4)]' : 'bg-white/5 text-gray-500 hover:text-white hover:bg-white/10 border border-white/5'}`}
-                   >
-                     {genre} <span className="opacity-40 ml-1">({genreCounts[genre]})</span>
-                   </button>
-                 ))}
-               </div>
-               
-               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6">
-                 {filteredLibrary.map(song => (
-                   <div key={song.id} onClick={() => handleSelectSong(song)} className={`group p-5 rounded-[2rem] transition-all cursor-pointer relative flex flex-col items-start text-left ${selectedSong?.id === song.id ? 'bg-[#1DB954]/10 ring-1 ring-[#1DB954]/30' : 'bg-white/[0.02] hover:bg-white/5 shadow-xl border border-white/5'}`}>
-                     <div className="aspect-square w-full bg-black rounded-2xl mb-4 flex items-center justify-center shadow-lg group-hover:scale-105 transition-transform overflow-hidden relative border border-white/5">
-                       {song.coverUrl && !imageErrors[song.id] ? (
-                         <img src={song.coverUrl} alt={song.title} className="w-full h-full object-cover" onError={() => handleImageError(song.id)} />
-                       ) : (
-                         <div className="w-full h-full flex flex-col items-center justify-center bg-gray-900/40 text-gray-700">
-                           <i className={`fas fa-compact-disc text-4xl transition-all duration-1000 ${selectedSong?.id === song.id && isPlaying ? 'text-[#1DB954] animate-spin-slow' : 'text-gray-800'}`}></i>
-                         </div>
-                       )}
-                       {selectedSong?.id === song.id && <div className="absolute inset-0 bg-[#1DB954]/5 flex items-center justify-center backdrop-blur-[1px]"><div className="w-2 h-2 rounded-full bg-[#1DB954] animate-ping"></div></div>}
-                     </div>
-                     <h4 className="font-black text-sm truncate w-full text-white mb-1 leading-tight">{song.title}</h4>
-                     <p className="text-[11px] text-gray-400 truncate w-full font-bold uppercase tracking-wide mb-1">{song.artist}</p>
-                     <div className="flex items-center gap-1.5 text-[10px] text-gray-500 font-bold mb-3">
-                        <i className="fas fa-clock text-[9px] opacity-60"></i>
-                        <span>{song.duration}</span>
-                     </div>
-                     <div className="flex items-center justify-between w-full mt-auto">
-                        <span className="text-[9px] text-gray-600 font-black uppercase tracking-widest bg-white/5 px-2 py-1 rounded-md">{song.genre}</span>
-                        {/* Share on Spotify Button */}
-                        <button 
-                          onClick={(e) => handleShareOnSpotify(e, song)}
-                          className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center text-gray-500 hover:text-[#1DB954] hover:bg-[#1DB954]/10 transition-all group/btn"
-                          title="Search on Spotify"
-                        >
-                          <i className="fab fa-spotify text-sm transform group-hover/btn:scale-110"></i>
-                        </button>
-                     </div>
+                 <div className="flex flex-col lg:flex-row gap-12 items-start">
+                   <div className="flex-none w-full lg:w-80 flex flex-col items-center bg-white/[0.02] p-8 rounded-[3rem] border border-white/5">
+                      <SonicOrb energy={userProfile.preferenceVector.energy} brightness={userProfile.preferenceVector.spectralCentroid} intensity={userProfile.preferenceVector.mfccs} />
                    </div>
-                 ))}
-               </div>
-               
-               {filteredLibrary.length === 0 && (
-                 <div className="py-20 flex flex-col items-center justify-center text-center opacity-40">
-                    <i className="fas fa-filter text-5xl mb-6"></i>
-                    <p className="text-sm font-black uppercase tracking-widest">No tracks match your current filter manifold</p>
-                    <button onClick={() => { setSelectedGenre(null); setSearchQuery(''); }} className="mt-6 px-8 py-3 bg-white/5 hover:bg-white/10 rounded-full text-[10px] font-black uppercase tracking-widest border border-white/10 transition-all">Clear All Filters</button>
+                   <div className="flex-1 space-y-10 w-full">
+                      <section>
+                         <h3 className="text-sm font-black mb-6 text-white uppercase tracking-widest flex items-center gap-3">
+                            <i className="fas fa-microchip text-[#1DB954]"></i> Discovery Pipeline
+                         </h3>
+                         <div className="grid gap-4">
+                            {loading ? (
+                              Array(3).fill(0).map((_, i) => <div key={i} className="h-24 bg-white/5 rounded-3xl animate-pulse"></div>)
+                            ) : recommendations.map(rec => (
+                              <div key={rec.song.id} onClick={() => handleSelectSong(rec.song, true)} className="group bg-white/[0.02] hover:bg-white/[0.05] p-6 rounded-[2rem] border border-white/5 transition-all cursor-pointer flex items-center gap-6">
+                                 <div className="w-12 h-12 bg-black rounded-2xl flex items-center justify-center border border-white/5 group-hover:scale-110 transition-transform overflow-hidden relative">
+                                    {rec.song.coverUrl && !imageErrors[rec.song.id] ? (
+                                      <img src={rec.song.coverUrl} alt={rec.song.title} className="w-full h-full object-cover" onError={() => handleImageError(rec.song.id)} />
+                                    ) : (
+                                      <i className="fas fa-compact-disc text-xl text-gray-800"></i>
+                                    )}
+                                    {selectedSong?.id === rec.song.id && isPlaying && <div className="absolute inset-0 bg-[#1DB954]/20 flex items-center justify-center"><i className="fas fa-pause text-white text-[10px]"></i></div>}
+                                 </div>
+                                 <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-3 mb-1">
+                                       <h4 className="font-black text-sm text-white truncate">{rec.song.title}</h4>
+                                       <span className="text-[9px] font-black text-[#1DB954] uppercase tracking-tighter bg-[#1DB954]/10 px-2 py-0.5 rounded-full">{Math.round(rec.similarity * 100)}% Match</span>
+                                    </div>
+                                    <p className="text-[10px] text-gray-500 font-bold uppercase">{rec.song.artist}</p>
+                                 </div>
+                                 <div className="hidden xl:block max-w-[280px] text-[10px] text-gray-500 italic leading-snug">{rec.explanation}</div>
+                              </div>
+                            ))}
+                         </div>
+                      </section>
+                   </div>
                  </div>
-               )}
+              </div>
+            ) : (
+              <div className="animate-fade-in space-y-8 pb-32">
+                 <ContentSearchBar />
+                 
+                 <div className="flex items-center gap-3 overflow-x-auto pb-6 no-scrollbar relative mb-4">
+                   <button 
+                     onClick={() => setSelectedGenre(null)} 
+                     className={`flex-none px-6 py-3 rounded-full text-[10px] font-black uppercase tracking-widest transition-all ${!selectedGenre ? 'bg-[#1DB954] text-black shadow-[0_10px_25px_rgba(29,185,84,0.4)]' : 'bg-white/5 text-gray-500 hover:text-white hover:bg-white/10 border border-white/5'}`}
+                   >
+                     All Tracks <span className="opacity-40 ml-1">({library.length})</span>
+                   </button>
+                   {uniqueGenres.map(genre => (
+                     <button 
+                       key={genre} 
+                       onClick={() => setSelectedGenre(genre)} 
+                       className={`flex-none px-6 py-3 rounded-full text-[10px] font-black uppercase tracking-widest transition-all transform hover:scale-105 active:scale-95 ${selectedGenre === genre ? 'bg-[#1DB954] text-black shadow-[0_10px_25px_rgba(29,185,84,0.4)]' : 'bg-white/5 text-gray-500 hover:text-white hover:bg-white/10 border border-white/5'}`}
+                     >
+                       {genre} <span className="opacity-40 ml-1">({genreCounts[genre]})</span>
+                     </button>
+                   ))}
+                   
+                   {/* Duration Sort Toggle */}
+                   <button 
+                     onClick={toggleDurationSort}
+                     className={`ml-auto flex-none px-6 py-3 rounded-full text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-2 ${durationSort !== 'none' ? 'bg-white text-black' : 'bg-white/5 text-gray-500 hover:text-white border border-white/5'}`}
+                   >
+                     Duration
+                     {durationSort === 'none' && <i className="fas fa-sort opacity-40"></i>}
+                     {durationSort === 'asc' && <i className="fas fa-sort-up"></i>}
+                     {durationSort === 'desc' && <i className="fas fa-sort-down"></i>}
+                   </button>
+                 </div>
+                 
+                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6">
+                   {filteredLibrary.map(song => (
+                     <div key={song.id} onClick={() => handleSelectSong(song, true)} className={`group p-5 rounded-[2rem] transition-all cursor-pointer relative flex flex-col items-start text-left ${selectedSong?.id === song.id ? 'bg-[#1DB954]/10 ring-1 ring-[#1DB954]/30' : 'bg-white/[0.02] hover:bg-white/5 shadow-xl border border-white/5'}`}>
+                       <div className="aspect-square w-full bg-black rounded-2xl mb-4 flex items-center justify-center shadow-lg group-hover:scale-105 transition-transform overflow-hidden relative border border-white/5">
+                         {song.coverUrl && !imageErrors[song.id] ? (
+                           <img src={song.coverUrl} alt={song.title} className="w-full h-full object-cover" onError={() => handleImageError(song.id)} />
+                         ) : (
+                           <div className="w-full h-full flex flex-col items-center justify-center bg-gray-900/40 text-gray-700">
+                             <i className={`fas fa-compact-disc text-4xl transition-all duration-1000 ${selectedSong?.id === song.id && isPlaying ? 'text-[#1DB954] animate-spin-slow' : 'text-gray-800'}`}></i>
+                           </div>
+                         )}
+                         {selectedSong?.id === song.id && <div className="absolute inset-0 bg-[#1DB954]/5 flex items-center justify-center backdrop-blur-[1px]"><div className="w-2 h-2 rounded-full bg-[#1DB954] animate-ping"></div></div>}
+                       </div>
+                       <h4 className="font-black text-sm truncate w-full text-white mb-1 leading-tight">{song.title}</h4>
+                       <p className="text-[11px] text-gray-400 truncate w-full font-bold uppercase tracking-wide mb-1">{song.artist}</p>
+                       <p className="text-[9px] text-gray-600 truncate w-full font-bold uppercase tracking-widest mb-1 italic opacity-60">{song.album}</p>
+                       <div className="flex items-center gap-1.5 text-[10px] text-gray-500 font-bold mb-3">
+                          <i className="fas fa-clock text-[9px] opacity-60"></i>
+                          <span>{song.duration}</span>
+                       </div>
+                       <div className="flex items-center justify-between w-full mt-auto">
+                          <span className="text-[9px] text-gray-600 font-black uppercase tracking-widest bg-white/5 px-2 py-1 rounded-md">{song.genre}</span>
+                          <button 
+                            onClick={(e) => handleShareOnSpotify(e, song)}
+                            className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center text-gray-500 hover:text-[#1DB954] hover:bg-[#1DB954]/10 transition-all group/btn"
+                            title="Search on Spotify"
+                          >
+                            <i className="fab fa-spotify text-sm transform group-hover/btn:scale-110"></i>
+                          </button>
+                       </div>
+                     </div>
+                   ))}
+                 </div>
+                 
+                 {filteredLibrary.length === 0 && (
+                   <div className="py-20 flex flex-col items-center justify-center text-center opacity-40">
+                      <i className="fas fa-filter text-5xl mb-6"></i>
+                      <p className="text-sm font-black uppercase tracking-widest">No tracks match your current filter manifold</p>
+                      <button onClick={() => { setSelectedGenre(null); setSearchQuery(''); setSearchCriteria('all'); setDurationSort('none'); }} className="mt-6 px-8 py-3 bg-white/5 hover:bg-white/10 rounded-full text-[10px] font-black uppercase tracking-widest border border-white/10 transition-all">Clear All Filters</button>
+                   </div>
+                 )}
+              </div>
+            )}
+          </div>
+
+          {/* Playback Queue Overlay */}
+          {isQueueOpen && (
+            <div className="w-80 flex-none bg-[#0c0c0c] border-l border-white/5 flex flex-col animate-fade-in-right z-[60]">
+               <div className="p-8 border-b border-white/5 flex items-center justify-between">
+                  <h3 className="text-xs font-black text-white uppercase tracking-widest italic">Playback Queue</h3>
+                  <button onClick={() => setIsQueueOpen(false)} className="text-gray-500 hover:text-white transition-colors">
+                     <i className="fas fa-times"></i>
+                  </button>
+               </div>
+               <div className="flex-1 overflow-y-auto p-4 space-y-2 custom-scrollbar">
+                  {queue.length > 0 ? (
+                    queue.map((song, idx) => (
+                      <div key={`${song.id}-${idx}`} className="group bg-white/[0.02] hover:bg-white/[0.05] border border-white/5 rounded-2xl p-4 flex items-center gap-4 transition-all">
+                        <div className="w-10 h-10 bg-black rounded-lg flex-none overflow-hidden relative">
+                           {song.coverUrl && !imageErrors[song.id] ? (
+                             <img src={song.coverUrl} alt={song.title} className="w-full h-full object-cover" onError={() => handleImageError(song.id)} />
+                           ) : (
+                             <i className="fas fa-compact-disc text-gray-800 text-lg absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2"></i>
+                           )}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                           <p className="text-[11px] font-black text-white truncate">{song.title}</p>
+                           <p className="text-[9px] text-gray-500 font-bold uppercase truncate">{song.artist}</p>
+                        </div>
+                        <div className="flex flex-col gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                           <button onClick={() => moveInQueue(idx, 'up')} className="text-[10px] text-gray-500 hover:text-white" disabled={idx === 0}>
+                              <i className="fas fa-chevron-up"></i>
+                           </button>
+                           <button onClick={() => removeFromQueue(idx)} className="text-[10px] text-red-900 hover:text-red-500">
+                              <i className="fas fa-trash"></i>
+                           </button>
+                           <button onClick={() => moveInQueue(idx, 'down')} className="text-[10px] text-gray-500 hover:text-white" disabled={idx === queue.length - 1}>
+                              <i className="fas fa-chevron-down"></i>
+                           </button>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="h-full flex flex-col items-center justify-center text-center opacity-30 px-6">
+                       <i className="fas fa-layer-group text-4xl mb-6"></i>
+                       <p className="text-[10px] font-black uppercase tracking-widest">The sonic queue is empty.</p>
+                       <p className="text-[9px] font-bold mt-2">Pick a track to rebuild the context.</p>
+                    </div>
+                  )}
+               </div>
             </div>
           )}
         </div>
@@ -700,13 +863,13 @@ const App: React.FC = () => {
            </div>
            <div className="w-1/2 flex flex-col items-center gap-3">
               <div className="flex items-center gap-10 text-gray-500">
-                 <i onClick={() => setIsShuffle(!isShuffle)} className={`fas fa-random text-sm cursor-pointer transition-colors ${isShuffle ? 'text-[#1DB954]' : 'hover:text-white'}`}></i>
-                 <i className="fas fa-step-backward text-lg hover:text-white cursor-pointer transition-colors"></i>
+                 <i onClick={() => setIsShuffle(!isShuffle)} className={`fas fa-random text-sm cursor-pointer transition-colors ${isShuffle ? 'text-[#1DB954]' : 'hover:text-white'}`} title="Shuffle"></i>
+                 <i onClick={handlePreviousSong} className="fas fa-step-backward text-lg hover:text-white cursor-pointer transition-colors"></i>
                  <div onClick={() => setIsPlaying(!isPlaying)} className="w-12 h-12 bg-white rounded-full flex items-center justify-center text-black hover:scale-110 transition-transform cursor-pointer shadow-[0_0_20px_rgba(255,255,255,0.2)]">
                     <i className={`fas ${isPlaying ? 'fa-pause' : 'fa-play'} text-xl ${!isPlaying ? 'ml-1' : ''}`}></i>
                  </div>
-                 <i className="fas fa-step-forward text-lg hover:text-white cursor-pointer transition-colors"></i>
-                 <i onClick={() => setIsRepeat(!isRepeat)} className={`fas fa-redo text-sm cursor-pointer transition-colors ${isRepeat ? 'text-[#1DB954]' : 'hover:text-white'}`}></i>
+                 <i onClick={handleNextSong} className="fas fa-step-forward text-lg hover:text-white cursor-pointer transition-colors"></i>
+                 <i onClick={() => setIsRepeat(!isRepeat)} className={`fas fa-redo text-sm cursor-pointer transition-colors ${isRepeat ? 'text-[#1DB954]' : 'hover:text-white'}`} title="Repeat"></i>
               </div>
               <div className="w-full max-md flex items-center gap-4">
                  <span className="text-[9px] font-black text-gray-500 tabular-nums">{formatTime(currentTime)}</span>
@@ -718,6 +881,13 @@ const App: React.FC = () => {
               </div>
            </div>
            <div className="w-1/4 flex justify-end items-center gap-6">
+              <button 
+                onClick={() => setIsQueueOpen(!isQueueOpen)}
+                className={`w-8 h-8 rounded-full flex items-center justify-center transition-all ${isQueueOpen ? 'bg-[#1DB954]/20 text-[#1DB954]' : 'text-gray-500 hover:text-white hover:bg-white/5'}`}
+                title="Toggle Queue"
+              >
+                 <i className="fas fa-layer-group text-sm"></i>
+              </button>
               <button 
                 onClick={cyclePlaybackSpeed}
                 className="px-3 py-1 bg-white/5 border border-white/10 rounded-full text-[10px] font-black text-gray-400 hover:text-white hover:border-white/20 transition-all"
@@ -745,6 +915,8 @@ const App: React.FC = () => {
         .animate-slide-up { animation: slideUp 0.6s cubic-bezier(0.19, 1, 0.22, 1) forwards; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
         .animate-fade-in { animation: fadeIn 0.3s ease-out forwards; }
+        @keyframes fadeInRight { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
+        .animate-fade-in-right { animation: fadeInRight 0.4s cubic-bezier(0.19, 1, 0.22, 1) forwards; }
       `}</style>
     </div>
   );

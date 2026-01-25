@@ -12,6 +12,7 @@ export interface Song {
   id: string;
   title: string;
   artist: string;
+  album: string;
   genre: string;
   duration: string; // Track length (e.g., "3:45")
   audioUrl?: string; // Real audio source URL
