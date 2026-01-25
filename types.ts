@@ -13,9 +13,12 @@ export interface Song {
   title: string;
   artist: string;
   genre: string;
+  duration: string; // Track length (e.g., "3:45")
+  audioUrl?: string; // Real audio source URL
   features: AudioFeatures;
   embedding: [number, number]; // 2D projection for visualization
   clusterId: number;
+  coverUrl?: string; // Album artwork URL
 }
 
 export interface UserProfile {
@@ -28,4 +31,14 @@ export interface Recommendation {
   song: Song;
   similarity: number;
   explanation: string;
+}
+
+export interface SearchSource {
+  title: string;
+  uri: string;
+}
+
+export interface LiveDiscovery {
+  text: string;
+  sources: SearchSource[];
 }
