@@ -3,5 +3,6 @@
   "description": "An advanced music recommendation engine that maps your Spotify library to latent sound patterns, providing intuitive discovery without the clutter of technical metadata.",
   "requestFramePermissions": [
     "microphone"
-  ]
+  ],
+  "majorCapabilities": []
 }
